@@ -1,0 +1,124 @@
+library("twitteR")
+library("ROAuth")
+library("e1071")
+library("RTextTools")
+library("plyr")
+library("tm")
+library("class")
+library("stringr")
+library("caret")
+
+#Connecting to twitterAPI
+requestURL <- "https://api.twitter.com/oauth/request_token"
+accessURL = "https://api.twitter.com/oauth/access_token"
+authURL = "https://api.twitter.com/oauth/authorize"
+
+consumerKey = ##include own key##
+consumerSecret = ##include own key##
+
+accessToken = ##include own key##
+accessSecret = ##include own key##
+
+setup_twitter_oauth(consumerKey, consumerSecret, accessToken, accessSecret)
+
+#Mining and cleaning of training data from twitter acc
+sports = list("espn","SkySports")
+animals = list("WorldAnimalNews","theirturn")
+fashion = list("FashionNewsLive","newsonfashion")    
+food = list("FoodWorldNews","foodbevnews")
+photography = list("PhotoNewsPro","pdnonline")
+business = list("BBCBusiness","BTBreakingnews")
+gaming = list("VideoGameNews","rgamingnews")
+politics = list("foxnewspolitics","BBCPolitics")
+travel = list("BTN_News","travelnewsred")
+auto = list("carslatestnews","autonewz")
+
+allCat = list(sports,animals,fashion,food,photography,business,gaming,politics,travel,auto)
+
+
+#Loop to shorten codes for data prep
+i=0
+combine.tdm = data.frame()
+for(category in allCat){
+  i = i+1
+  for(user in category){
+    #IMPORTANT CLEANSING of Data
+    text = twListToDF(userTimeline(getUser(user),n=100,excludeReplies = T,includeRts = T))$text
+    text = gsub("http\\S+\\s*", "", text) #removing urls
+    text = gsub("via", "", text) #removing via
+    text = gsub("RT", "",text)
+    text=str_replace_all(text,"[^[:graph:]]", " ") #removing non-graphical char eg.emoticons
+    #Transformation to tdm
+    cor = Corpus(VectorSource(text))
+    tdm = DocumentTermMatrix(cor, control=list(removePunctunation=TRUE, toLower=TRUE, removeNumbers=TRUE, stemDocument=TRUE, stopwords=T))
+    tdm1 = as.matrix(tdm)
+    tdm1 = as.data.frame(tdm1)
+    #Intrincitly labelling of data
+    tdm1$la_bel = c(rep(i,nrow(tdm1)))
+    combine.tdm = rbind.fill(combine.tdm, tdm1)
+  }
+}
+combine.tdm[is.na(combine.tdm)] <- 0
+
+#Repacking into training and testing
+set.seed(1)
+TOTAL = nrow(combine.tdm)
+TRAIN_VOL = TOTAL/1.2
+sample <- sample(1:TOTAL, TOTAL)
+combine.shuffle.tdm <- combine.tdm[sample,]
+ddf = combine.shuffle.tdm
+ddf = ddf[ , names(ddf) != "la_bel"]
+
+# Feature Selection
+## Remove redundant highly correlated features 
+##cormat = cor(ddf)
+##highlycor = findCorrelation(cormat,cutoff = 0.75)
+##ddf = ddf[,-highlycor]
+
+#Choosing top 2000 most frequent words
+topwords = colSums(ddf)
+head = sort(topwords, decreasing = TRUE)
+top1000 = names(head[1:500])
+ddf = ddf[top1000]
+
+container <- create_container(ddf , combine.shuffle.tdm$la_bel, trainSize=1:TRAIN_VOL, testSize=(TRAIN_VOL+1):TOTAL, virgin=FALSE)
+
+#Training Models
+set.seed(123)
+SVM <- train_model(container,"SVM")
+SVM_CLASSIFY <- classify_model(container, SVM)
+analytics <- create_analytics(container, SVM_CLASSIFY)
+analytics@algorithm_summary
+cross_validate(container, 4, "SVM")
+table(true = analytics@document_summary$MANUAL_CODE, predict = analytics@document_summary$SVM_LABEL)
+
+MAX <- train_model(container,"MAXENT")
+MAX_CLASSIFY <- classify_model(container, MAX)
+analytics <- create_analytics(container, MAX_CLASSIFY)
+analytics@algorithm_summary
+cross_validate(container, 4, "MAXENT")
+table(true = analytics@document_summary$MANUAL_CODE, predict = analytics@document_summary$MAXENT_LABEL)
+
+#Building user front end
+template = ddf[0,]
+NUMFEATURES = ncol(template)
+while(T){
+  results = array()
+  user = readline(prompt="Enter a Twitter user: ")
+  posts = twListToDF(userTimeline(getUser(user),n=100,excludeReplies = T,includeRts = T))$text
+  text = gsub("http\\S+\\s*", "", posts) #removing urls
+  text = gsub("via", "", text) #removing via
+  text=str_replace_all(text,"[^[:graph:]]", " ")
+  cor = Corpus(VectorSource(text))
+  tdm = DocumentTermMatrix(cor, control=list(removePunctunation=TRUE, toLower=TRUE, removeNumbers=TRUE, stemDocument=TRUE, stopwords=T))
+  tdm1 = as.matrix(tdm)
+  tdm1 = as.data.frame(tdm1)
+  tdm1 = rbind.fill(template,tdm1)
+  tdm1 = tdm1[,1:NUMFEATURES]
+  tdm1[is.na(tdm1)] <- 0
+  results = append(results,predict(SVM,tdm1))
+  result = sort(table(results),decreasing=TRUE)[1]
+  categories = list("sports","animals","fashion","food","photography","business","gaming","politics","travel","auto")
+  interest = categories[as.integer(names(result))]
+  cat(paste("Top Interest : ", interest))
+}
